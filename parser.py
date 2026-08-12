@@ -1,9 +1,15 @@
-"""Extração e parsing dos PDFs 'Mapa de Frequência Sintético' do Portal SIGEduc."""
+"""Extração e parsing dos PDFs 'Mapa de Frequência Sintético' do Portal SIGEduc.
+
+O parsing é feito pelas coordenadas das colunas, e não pela ordem dos valores no
+texto: quando um mês não tem lançamento, a célula sai vazia e os valores
+seguintes escorregariam para o mês errado se fossem lidos apenas em sequência.
+Cada valor é atribuído à coluna cujo centro está mais próximo do seu.
+"""
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pdfplumber
@@ -11,6 +17,24 @@ import pdfplumber
 
 class LayoutInesperadoError(Exception):
     """PDF que não segue o layout esperado do Mapa de Frequência Sintético."""
+
+
+MESES = ["FEV", "MAR", "ABR", "MAI", "JUN", "JUL", "AGO", "SET", "OUT", "NOV", "DEZ"]
+COLUNAS_TOTAIS = ["Abonadas", "Faltas", "Aulas", "Freq."]
+
+
+@dataclass(frozen=True)
+class MesFreq:
+    """Faltas e frequência de um aluno em um mês."""
+
+    faltas: int
+    frequencia: float | None = None
+
+    @property
+    def frequencia_fmt(self) -> str:
+        if self.frequencia is None:
+            return "—"
+        return f"{self.frequencia:.1f}".replace(".", ",") + "%"
 
 
 @dataclass(frozen=True)
@@ -34,11 +58,15 @@ class Aluno:
     aulas: int
     frequencia: float
     turma_info: Turma
+    meses: dict[str, MesFreq] = field(default_factory=dict)
     arquivo: str = ""
 
     @property
     def frequencia_fmt(self) -> str:
         return f"{self.frequencia:.1f}".replace(".", ",") + "%"
+
+    def mes(self, nome: str) -> MesFreq | None:
+        return self.meses.get(nome)
 
 
 # --- Cabeçalho -------------------------------------------------------------
@@ -56,17 +84,18 @@ TITULO_ESPERADO = "mapa de frequência sintético"
 # Tokens que ocupam uma célula numérica da tabela ("*" = sem faltas no mês).
 RE_VALOR = re.compile(r"^(?:\*|-{1,2}|[\d.,]+%?)$")
 RE_TEM_LETRA = re.compile(r"[A-Za-zÀ-ÿ]")
+VAZIOS = {"*", "-", "--", ""}
 
 
 def _e_valor(token: str) -> bool:
-    if token in {"*", "-", "--"}:
+    if token in VAZIOS:
         return True
     return bool(RE_VALOR.match(token)) and any(c.isdigit() for c in token)
 
 
 def _para_numero(token: str) -> float:
     """Converte '71,3%' -> 71.3, '1.234' -> 1234.0, '*' -> 0.0."""
-    if token in {"*", "-", "--"}:
+    if token in VAZIOS:
         return 0.0
     limpo = token.rstrip("%").replace(".", "").replace(",", ".")
     return float(limpo)
@@ -113,15 +142,124 @@ def parse_cabecalho(texto_pagina: str) -> Turma | None:
     return info if (info.escola or info.componente) else None
 
 
+# --- Geometria da tabela ---------------------------------------------------
+
+
+@dataclass
+class Grade:
+    """Posição horizontal (centro em pontos) de cada coluna da tabela."""
+
+    meses: list[tuple[str, float, float]]  # (mês, centro de "F.", centro de "Freq.")
+    totais: dict[str, float]               # Abonadas / Faltas / Aulas / Freq.
+    inicio_valores: float                  # à esquerda disso está o nome do aluno
+    tolerancia: float                      # distância máxima valor <-> coluna
+
+    def centros(self) -> list[tuple[str, float]]:
+        saida: list[tuple[str, float]] = []
+        for mes, cx_f, cx_freq in self.meses:
+            saida.append((f"{mes}:F", cx_f))
+            saida.append((f"{mes}:Q", cx_freq))
+        for nome, cx in self.totais.items():
+            saida.append((f"T:{nome}", cx))
+        return saida
+
+
+def _centro(palavra: dict) -> float:
+    return (palavra["x0"] + palavra["x1"]) / 2
+
+
+def _agrupar_linhas(palavras: list[dict], tolerancia: float = 3.0) -> list[list[dict]]:
+    """Agrupa palavras em linhas visuais pela coordenada vertical."""
+    linhas: list[list[dict]] = []
+    atual: list[dict] = []
+    referencia: float | None = None
+
+    for palavra in sorted(palavras, key=lambda w: (w["top"], w["x0"])):
+        if referencia is None or abs(palavra["top"] - referencia) <= tolerancia:
+            if referencia is None:
+                referencia = palavra["top"]
+            atual.append(palavra)
+        else:
+            linhas.append(sorted(atual, key=lambda w: w["x0"]))
+            atual = [palavra]
+            referencia = palavra["top"]
+
+    if atual:
+        linhas.append(sorted(atual, key=lambda w: w["x0"]))
+    return linhas
+
+
+def _extrair_grade(linhas: list[list[dict]]) -> Grade | None:
+    """Descobre a posição das colunas a partir das linhas de cabeçalho da tabela."""
+    meses_pos: list[tuple[str, float]] = []
+    pares: list[tuple[float, float]] = []
+    totais: dict[str, float] = {}
+
+    for linha in linhas:
+        textos = [w["text"] for w in linha]
+
+        # Linha dos nomes dos meses ("FEV MAR ABR ...").
+        achados = [(t, _centro(w)) for t, w in zip(textos, linha) if t in MESES]
+        if len(achados) >= 2 and len(achados) > len(meses_pos):
+            meses_pos = achados
+
+        # Linha dos sub-cabeçalhos ("F. Freq. F. Freq. ...").
+        if len(linha) >= 4 and all(t in {"F.", "Freq."} for t in textos):
+            atual: list[tuple[float, float]] = []
+            i = 0
+            while i < len(linha) - 1:
+                if textos[i] == "F." and textos[i + 1] == "Freq.":
+                    atual.append((_centro(linha[i]), _centro(linha[i + 1])))
+                    i += 2
+                else:
+                    i += 1
+            if len(atual) > len(pares):
+                pares = atual
+
+        # Linha dos totais ("Nº Estudante Abonadas Faltas Aulas Freq.").
+        if "Abonadas" in textos and "Aulas" in textos:
+            for nome in COLUNAS_TOTAIS:
+                if nome in textos:
+                    totais[nome] = _centro(linha[textos.index(nome)])
+
+    if not meses_pos or not pares or len(totais) < len(COLUNAS_TOTAIS):
+        return None
+
+    # Cada par (F., Freq.) pertence ao mês cujo rótulo está mais próximo.
+    colunas_meses: list[tuple[str, float, float]] = []
+    for cx_f, cx_freq in pares:
+        meio = (cx_f + cx_freq) / 2
+        mes = min(meses_pos, key=lambda mp: abs(mp[1] - meio))[0]
+        colunas_meses.append((mes, cx_f, cx_freq))
+
+    # Sem meses repetidos: se o pareamento ficou ambíguo, a grade não é confiável.
+    nomes = [m for m, _, _ in colunas_meses]
+    if len(set(nomes)) != len(nomes):
+        return None
+
+    todos = sorted(
+        [cx for _, cx_f, cx_q in colunas_meses for cx in (cx_f, cx_q)]
+        + list(totais.values())
+    )
+    menor_espaco = min(
+        (b - a for a, b in zip(todos, todos[1:])), default=20.0
+    )
+    return Grade(
+        meses=colunas_meses,
+        totais=totais,
+        inicio_valores=todos[0] - menor_espaco / 2,
+        tolerancia=max(menor_espaco / 2, 4.0),
+    )
+
+
 # --- Linhas de aluno -------------------------------------------------------
 
 
 def parse_linha_aluno(linha: str) -> dict | None:
-    """Interpreta uma linha da tabela de alunos.
+    """Interpreta uma linha da tabela pelo texto (usado quando não há grade).
 
     O nome vai do Nº até o primeiro token numérico; os 4 últimos valores da
-    linha são sempre Abonadas, Faltas, Aulas e Freq. geral — os pares mensais
-    do meio são ignorados.
+    linha são sempre Abonadas, Faltas, Aulas e Freq. geral.
     """
     tokens = linha.split()
     if len(tokens) < 6 or not tokens[0].isdigit():
@@ -155,6 +293,74 @@ def parse_linha_aluno(linha: str) -> dict | None:
         "faltas": int(faltas),
         "aulas": int(aulas),
         "frequencia": freq,
+        "meses": {},
+    }
+
+
+def parse_linha_grade(linha: list[dict], grade: Grade) -> dict | None:
+    """Interpreta uma linha de aluno usando as coordenadas das colunas."""
+    if not linha:
+        return None
+
+    primeiro = linha[0]
+    if not primeiro["text"].isdigit() or _centro(primeiro) >= grade.inicio_valores:
+        return None
+
+    nome_partes = [
+        w["text"]
+        for w in linha[1:]
+        if _centro(w) < grade.inicio_valores
+    ]
+    nome = " ".join(nome_partes)
+    if not RE_TEM_LETRA.search(nome) or "total de faltas" in nome.lower():
+        return None
+
+    # Atribui cada valor à coluna cujo centro está mais próximo.
+    centros = grade.centros()
+    celulas: dict[str, str] = {}
+    for palavra in linha[1:]:
+        cx = _centro(palavra)
+        if cx < grade.inicio_valores:
+            continue
+        chave, distancia = min(
+            ((c, abs(cx - x)) for c, x in centros), key=lambda item: item[1]
+        )
+        if distancia > grade.tolerancia or chave in celulas:
+            continue
+        celulas[chave] = palavra["text"]
+
+    try:
+        abonadas = _para_numero(celulas.get("T:Abonadas", "0"))
+        faltas = _para_numero(celulas["T:Faltas"])
+        aulas = _para_numero(celulas["T:Aulas"])
+        freq = _para_numero(celulas["T:Freq."])
+    except (KeyError, ValueError):
+        return None
+
+    if aulas <= 0 or faltas < 0 or not 0 <= freq <= 100:
+        return None
+
+    meses: dict[str, MesFreq] = {}
+    for mes, _, _ in grade.meses:
+        bruto_f = celulas.get(f"{mes}:F")
+        if bruto_f is None:
+            continue
+        bruto_q = celulas.get(f"{mes}:Q")
+        try:
+            faltas_mes = int(_para_numero(bruto_f))
+            freq_mes = None if bruto_q is None else _para_numero(bruto_q)
+        except ValueError:
+            continue
+        meses[mes] = MesFreq(faltas_mes, freq_mes)
+
+    return {
+        "numero": int(primeiro["text"]),
+        "nome": nome,
+        "abonadas": int(abonadas),
+        "faltas": int(faltas),
+        "aulas": int(aulas),
+        "frequencia": freq,
+        "meses": meses,
     }
 
 
@@ -170,6 +376,7 @@ def extrair_alunos(caminho: str | Path) -> list[Aluno]:
     caminho = Path(caminho)
     alunos: list[Aluno] = []
     meta_atual: Turma | None = None
+    grade_atual: Grade | None = None
     viu_titulo = False
 
     try:
@@ -187,16 +394,34 @@ def extrair_alunos(caminho: str | Path) -> list[Aluno]:
             if meta_pagina:
                 meta_atual = meta_pagina
 
-            for linha in texto.splitlines():
-                dados = parse_linha_aluno(linha)
-                if dados:
-                    alunos.append(
-                        Aluno(
-                            **dados,
-                            turma_info=meta_atual or Turma(),
-                            arquivo=caminho.name,
-                        )
+            linhas = _agrupar_linhas(pagina.extract_words())
+            grade_pagina = _extrair_grade(linhas)
+            if grade_pagina:
+                grade_atual = grade_pagina
+
+            da_pagina: list[dict] = []
+            if grade_atual:
+                da_pagina = [
+                    d
+                    for d in (parse_linha_grade(linha, grade_atual) for linha in linhas)
+                    if d
+                ]
+            if not da_pagina:
+                # Sem grade reconhecível (ou nenhuma linha casou): lê pelo texto,
+                # sem o detalhamento mensal.
+                da_pagina = [
+                    d
+                    for d in (
+                        parse_linha_aluno(" ".join(w["text"] for w in linha))
+                        for linha in linhas
                     )
+                    if d
+                ]
+
+            alunos.extend(
+                Aluno(**dados, turma_info=meta_atual or Turma(), arquivo=caminho.name)
+                for dados in da_pagina
+            )
 
     if not alunos:
         motivo = (
@@ -207,6 +432,28 @@ def extrair_alunos(caminho: str | Path) -> list[Aluno]:
         raise LayoutInesperadoError(motivo)
 
     return alunos
+
+
+def meses_lancados(alunos: list[Aluno]) -> list[str]:
+    """Meses com algum lançamento no grupo, na ordem do ano letivo."""
+    presentes = {mes for aluno in alunos for mes in aluno.meses}
+    return [mes for mes in MESES if mes in presentes]
+
+
+def divergencias_de_soma(alunos: list[Aluno]) -> list[tuple[str, int, int]]:
+    """Alunos em que a soma dos meses não bate com a coluna 'Faltas'.
+
+    O relatório do SIGEduc é internamente consistente, então divergência aqui
+    indica leitura errada das colunas — vale avisar em vez de silenciar.
+    """
+    fora: list[tuple[str, int, int]] = []
+    for aluno in alunos:
+        if not aluno.meses:
+            continue
+        soma = sum(m.faltas for m in aluno.meses.values())
+        if soma != aluno.faltas:
+            fora.append((aluno.nome, soma, aluno.faltas))
+    return fora
 
 
 def filtrar_por_faltas(alunos: list[Aluno], limite: float) -> list[Aluno]:
@@ -222,9 +469,7 @@ class ResultadoLote:
     processados: int
 
 
-def processar_lote(
-    pdfs: list[Path], limite: float, log=None
-) -> ResultadoLote:
+def processar_lote(pdfs: list[Path], limite: float, log=None) -> ResultadoLote:
     """Processa vários PDFs, sem deixar que um arquivo ruim interrompa o lote.
 
     `log` é um callable opcional que recebe mensagens de progresso.
@@ -253,12 +498,20 @@ def processar_lote(
         processados += 1
 
         info = alunos[0].turma_info
+        meses = meses_lancados(alunos)
         contexto = " | ".join(x for x in (info.turma, info.turno) if x)
         registrar(
             f"  [OK] {pdf.name}: {len(alunos)} aluno(s)"
             + (f" ({contexto})" if contexto else "")
+            + (f" | meses: {', '.join(meses)}" if meses else "")
             + f" -> {len(acima)} acima do limite"
         )
+
+        for nome, soma, total in divergencias_de_soma(alunos):
+            registrar(
+                f"     [ATENCAO] {nome}: soma dos meses ({soma}) difere do total"
+                f" impresso ({total})"
+            )
 
     return ResultadoLote(alunos_filtrados, total_analisado, falhas, processados)
 
@@ -276,13 +529,18 @@ def listar_pdfs(caminho: str | Path, recursivo: bool = False) -> list[Path]:
 
 __all__ = [
     "Aluno",
+    "MesFreq",
     "Turma",
     "ResultadoLote",
     "LayoutInesperadoError",
+    "MESES",
+    "divergencias_de_soma",
     "extrair_alunos",
     "filtrar_por_faltas",
+    "meses_lancados",
     "processar_lote",
     "listar_pdfs",
     "parse_cabecalho",
     "parse_linha_aluno",
+    "parse_linha_grade",
 ]

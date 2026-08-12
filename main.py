@@ -91,9 +91,15 @@ def main(argv: list[str] | None = None) -> int:
         print("\nAlunos acima do limite:")
         for aluno in sorted(todos, key=lambda a: (-a.faltas, a.nome)):
             print(
-                f"  {aluno.faltas:>4} faltas  {aluno.nome}"
-                f"  ({aluno.turma_info.turma or '—'})"
+                f"  {aluno.faltas:>4} faltas ({aluno.frequencia_fmt:>6})  {aluno.nome}"
+                f"  [{aluno.turma_info.turma or '—'}]"
             )
+            detalhe = "  ".join(
+                f"{mes} {registro.faltas}/{registro.frequencia_fmt}"
+                for mes, registro in aluno.meses.items()
+            )
+            if detalhe:
+                print(f"        {detalhe}")
 
     saida = gerar_relatorio(todos, args.saida, args.limite, total_analisado)
 

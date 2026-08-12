@@ -4,6 +4,10 @@ Lê relatórios **"Mapa de Frequência Sintético – Número de Faltas"** do Po
 (Secretaria Municipal de Educação) em PDF e gera um novo PDF com os alunos que
 ultrapassaram um limite de faltas no ano letivo.
 
+O relatório de saída traz **faltas e frequência mês a mês** (apenas os meses já
+lançados no sistema) ao lado dos totais do ano — Abonadas, Faltas, Aulas e Frequência
+geral — agrupados por turma.
+
 Funciona com um único PDF ou com uma pasta inteira, consolidando várias turmas em um
 só relatório e mantendo turma, turno, escola e professor(a) de cada aluno.
 
@@ -69,10 +73,18 @@ na primeira execução.
 
 ## Como o PDF de entrada é interpretado
 
-- **Linha de aluno**: os tokens são separados; o nome vai do `Nº` até o primeiro valor
-  numérico, e os **4 últimos valores da linha** são sempre `Abonadas`, `Faltas`, `Aulas`
-  e `Freq.` geral. Os pares mensais (`F.` / `Freq.`) do meio são ignorados, então não
-  importa quantos meses já foram lançados no sistema. `*` conta como zero.
+- **Leitura por coordenadas, não por ordem**: cada valor é atribuído à coluna cujo
+  centro (em pontos) está mais próximo do seu, usando as posições dos cabeçalhos
+  `FEV MAR ABR ...` e `F. Freq.`. Isso é essencial porque células vazias não ocupam
+  espaço no texto extraído: um aluno sem lançamento em um mês do meio faria todos os
+  pares seguintes escorregarem para o mês errado se fossem lidos em sequência. `*`
+  conta como zero falta.
+- **Conferência automática**: a soma das faltas mensais é comparada com a coluna
+  `Faltas`; qualquer divergência vira aviso no console, já que o relatório do SIGEduc
+  é internamente consistente e diferença ali indica leitura errada.
+- **Reserva**: se a grade de colunas não for reconhecida, o parser cai para leitura
+  textual — pega o `Nº`, o nome e os **4 últimos valores da linha** (`Abonadas`,
+  `Faltas`, `Aulas`, `Freq.`), sem o detalhamento mensal.
 - **Cabeçalho por página**, não por arquivo: um PDF com várias turmas é tratado
   corretamente, e páginas de continuação (sem cabeçalho) herdam os metadados da
   anterior. A linha `Total de faltas da Turma:` é descartada antes da leitura do
