@@ -1,0 +1,21 @@
+# Executáveis e artefatos de compilação (regeráveis com build.bat)
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Relatórios do SIGEduc e PDFs gerados: contêm nomes de alunos.
+# Dados pessoais não devem ir para o repositório.
+*.pdf
+
+# Sistema
+Thumbs.db
+desktop.ini
+.DS_Store
