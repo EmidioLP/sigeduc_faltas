@@ -7,6 +7,7 @@ colunas de faltas e frequência de cada mês.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -24,12 +25,18 @@ from reportlab.platypus import (
     TableStyle,
 )
 
-from parser import Aluno, Turma, meses_lancados
+from parser import (
+    PREFIXO_SAIDA,
+    Aluno,
+    Turma,
+    agrupar_por_escola,
+    meses_lancados,
+)
 
 MARGEM = 12 * mm
 
 LARG_NOME = 58 * mm
-LARG_TOTAIS = [15 * mm, 14 * mm, 14 * mm, 16 * mm]  # Abonadas, Faltas, Aulas, Freq.
+LARG_TOTAIS = [17 * mm, 14 * mm, 14 * mm, 16 * mm]  # Abonadas, Faltas, Aulas, Freq.
 LARG_MES_MINIMA = 16 * mm  # abaixo disso "100,0%" não cabe: muda para A3
 PROPORCAO_FALTAS = 0.38    # divisão da largura do mês entre "F." e "Freq."
 
@@ -194,16 +201,23 @@ def gerar_relatorio(
     saida: str | Path,
     limite: float,
     total_analisado: int | None = None,
+    escola: str | None = None,
 ) -> Path:
-    """Escreve o PDF de saída e devolve o caminho gerado."""
+    """Escreve o PDF de saída e devolve o caminho gerado.
+
+    `escola` nomeia o relatório no cabeçalho; sem isso, um relatório de escola
+    sem nenhum aluno acima do limite não diria de que escola se trata.
+    """
     saida = Path(saida)
     saida.parent.mkdir(parents=True, exist_ok=True)
 
     estilos = _estilos()
     grupos = _agrupar_por_turma(alunos)
-    pagina = _escolher_pagina(
-        max((len(meses_lancados(lista)) for _, lista in grupos), default=0)
-    )
+    # Um só conjunto de meses para o documento inteiro: turmas da mesma escola
+    # podem ter começado em meses diferentes, e colunas desalinhadas entre as
+    # seções tornariam o relatório difícil de comparar.
+    meses = meses_lancados(alunos)
+    pagina = _escolher_pagina(len(meses))
 
     doc = SimpleDocTemplate(
         str(saida),
@@ -220,6 +234,10 @@ def gerar_relatorio(
     agora = datetime.now().strftime("%d/%m/%Y às %H:%M")
     anos = sorted({a.turma_info.ano for a in alunos if a.turma_info.ano})
 
+    if escola is None:
+        escolas = sorted({a.turma_info.escola for a in alunos if a.turma_info.escola})
+        escola = escolas[0] if len(escolas) == 1 else None
+
     elementos: list = [
         Paragraph("Relatório de Alunos com Excesso de Faltas", estilos["titulo"]),
         Paragraph(
@@ -227,6 +245,10 @@ def gerar_relatorio(
             + (f" {'/'.join(anos)}" if anos else ""),
             estilos["subtitulo"],
         ),
+    ]
+    if escola:
+        elementos.append(Paragraph(f"<b>{escola}</b>", estilos["subtitulo"]))
+    elementos += [
         Spacer(1, 6 * mm),
         Paragraph(
             f"<b>Alunos listados:</b> {len(alunos)}"
@@ -250,7 +272,6 @@ def gerar_relatorio(
         return saida
 
     for turma, lista in grupos:
-        meses = meses_lancados(lista)
         cabecalho = " — ".join(x for x in (turma.escola, turma.turma) if x) or "Turma"
         detalhes = " &nbsp;&nbsp;|&nbsp;&nbsp; ".join(
             f"<b>{rotulo}:</b> {valor}"
@@ -277,4 +298,63 @@ def gerar_relatorio(
     return saida
 
 
-__all__ = ["gerar_relatorio"]
+# --- Um relatório por escola -----------------------------------------------
+
+# Caracteres proibidos em nome de arquivo no Windows.
+RE_INVALIDO = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def nome_arquivo_escola(escola: str) -> str:
+    """'CRECHE ARCO IRIS' -> 'relatorio_faltas_CRECHE_ARCO_IRIS.pdf'."""
+    base = RE_INVALIDO.sub("", escola)
+    base = re.sub(r"\s+", "_", base.strip())
+    base = base.strip("._")[:80].strip("._") or "sem_escola"
+    return f"{PREFIXO_SAIDA}_{base}.pdf"
+
+
+def gerar_relatorios_por_escola(
+    alunos: list[Aluno],
+    pasta: str | Path,
+    limite: float,
+    totais_por_escola: dict[str, int] | None = None,
+) -> list[Path]:
+    """Gera um PDF por escola, com todas as turmas daquela escola.
+
+    Escolas processadas que ficaram sem nenhum aluno acima do limite também
+    ganham um relatório, dizendo isso — a ausência de arquivo seria ambígua.
+    """
+    pasta = Path(pasta)
+    pasta.mkdir(parents=True, exist_ok=True)
+
+    totais = totais_por_escola or {}
+    grupos = agrupar_por_escola(alunos)
+    escolas = sorted(set(grupos) | set(totais))
+
+    saidas: list[Path] = []
+    usados: dict[str, int] = {}
+    for escola in escolas:
+        nome = nome_arquivo_escola(escola)
+        # Duas escolas diferentes podem gerar o mesmo nome de arquivo.
+        if nome in usados:
+            usados[nome] += 1
+            caminho = pasta / f"{Path(nome).stem}_{usados[nome]}.pdf"
+        else:
+            usados[nome] = 1
+            caminho = pasta / nome
+        gerar_relatorio(
+            grupos.get(escola, []),
+            caminho,
+            limite,
+            totais.get(escola),
+            escola=escola,
+        )
+        saidas.append(caminho)
+
+    return saidas
+
+
+__all__ = [
+    "gerar_relatorio",
+    "gerar_relatorios_por_escola",
+    "nome_arquivo_escola",
+]

@@ -8,8 +8,9 @@ O relatório de saída traz **faltas e frequência mês a mês** (apenas os mese
 lançados no sistema) ao lado dos totais do ano — Abonadas, Faltas, Aulas e Frequência
 geral — agrupados por turma.
 
-Funciona com um único PDF ou com uma pasta inteira, consolidando várias turmas em um
-só relatório e mantendo turma, turno, escola e professor(a) de cada aluno.
+Funciona com um único PDF ou com uma pasta inteira. **É gerado um PDF por escola**,
+`relatorio_faltas_NOME_DA_ESCOLA.pdf`, reunindo todas as turmas daquela escola em
+seções — cada uma com seu turno, professor(a) e componente.
 
 ## Como usar
 
@@ -34,9 +35,19 @@ python main.py pasta_com_pdfs --limite 30 --saida faltosos.pdf --verboso
 | Opção | Padrão | Descrição |
 |---|---|---|
 | `--limite` | `25` | lista alunos com **mais** faltas que este valor |
-| `--saida` | `relatorio_faltas.pdf` | caminho do PDF de saída |
+| `--saida` | pasta de entrada | pasta onde salvar os relatórios |
+| `--consolidado` | desligado | gera um único PDF com todas as escolas |
 | `--recursivo` | desligado | ao receber uma pasta, procura PDFs nas subpastas |
-| `--verboso` | desligado | lista os alunos filtrados no console |
+| `--verboso` | desligado | lista os alunos filtrados, mês a mês, no console |
+
+`--saida` também aceita um caminho `.pdf`, respeitado quando há uma escola só ou junto
+de `--consolidado`; com várias escolas, a pasta desse caminho é usada e os nomes saem
+por escola.
+
+Escolas processadas em que ninguém passou do limite também ganham um relatório, dizendo
+isso — arquivo nenhum seria ambíguo. E PDFs já gerados pelo app (`relatorio_faltas*.pdf`)
+são ignorados na leitura, então salvar a saída na mesma pasta dos mapas não quebra a
+execução seguinte.
 
 ## Instalação
 

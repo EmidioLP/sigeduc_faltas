@@ -28,7 +28,7 @@ from tkinter import (
 from tkinter import ttk
 
 from parser import listar_pdfs, processar_lote
-from report_generator import gerar_relatorio
+from report_generator import gerar_relatorios_por_escola
 
 TITULO = "Mapa de Faltas — SIGEduc"
 LIMITE_PADRAO = 25
@@ -74,7 +74,8 @@ class App:
             quadro,
             text=(
                 "Escolha o PDF do Mapa de Frequência Sintético (ou uma pasta com "
-                "vários) e clique em Gerar relatório."
+                "vários) e clique em Gerar relatório. É gerado um PDF por escola, "
+                "com todas as turmas dela."
             ),
             foreground="#555555",
             wraplength=680,
@@ -108,7 +109,7 @@ class App:
 
         # Saída
         caixa_saida = ttk.LabelFrame(
-            quadro, text=" 3. Onde salvar o relatório ", padding=10
+            quadro, text=" 3. Pasta onde salvar os relatórios ", padding=10
         )
         caixa_saida.pack(fill=X, pady=(10, 0))
         linha_saida = ttk.Frame(caixa_saida)
@@ -128,7 +129,7 @@ class App:
         )
         self.btn_gerar.pack(side=LEFT)
         self.btn_abrir = ttk.Button(
-            acoes, text="Abrir relatório", command=self._abrir, state="disabled"
+            acoes, text="Abrir resultado", command=self._abrir, state="disabled"
         )
         self.btn_abrir.pack(side=LEFT, padx=8)
         # Só aparece durante o processamento (parada, uma barra cheia confunde).
@@ -146,8 +147,7 @@ class App:
     # --- seleção de caminhos ----------------------------------------------
 
     def _sugerir_saida(self, base: Path) -> None:
-        pasta = base if base.is_dir() else base.parent
-        self.saida.set(str(pasta / "relatorio_faltas.pdf"))
+        self.saida.set(str(base if base.is_dir() else base.parent))
 
     def _escolher_pdf(self) -> None:
         caminho = filedialog.askopenfilename(
@@ -165,11 +165,8 @@ class App:
             self._sugerir_saida(Path(caminho))
 
     def _escolher_saida(self) -> None:
-        caminho = filedialog.asksaveasfilename(
-            title="Salvar relatório como",
-            defaultextension=".pdf",
-            initialfile="relatorio_faltas.pdf",
-            filetypes=[("Arquivos PDF", "*.pdf")],
+        caminho = filedialog.askdirectory(
+            title="Escolha a pasta onde salvar os relatórios"
         )
         if caminho:
             self.saida.set(caminho)
@@ -220,8 +217,9 @@ class App:
         if not self.saida.get().strip():
             self._sugerir_saida(Path(entrada))
         saida = Path(self.saida.get().strip().strip('"'))
-        if saida.suffix.lower() != ".pdf":
-            saida = saida.with_suffix(".pdf")
+        if saida.suffix.lower() == ".pdf":  # tolera um caminho de arquivo colado
+            saida = saida.parent
+            self.saida.set(str(saida))
 
         self.processando = True
         self.btn_gerar.configure(state="disabled")
@@ -248,10 +246,10 @@ class App:
 
             registrar(f"Processando {len(pdfs)} PDF(s)...\n")
             resultado = processar_lote(pdfs, limite, log=registrar)
-            gerar_relatorio(
-                resultado.alunos, saida, limite, resultado.total_analisado
+            saidas = gerar_relatorios_por_escola(
+                resultado.alunos, saida, limite, resultado.total_por_escola
             )
-            self.mensagens.put(("fim", (resultado, saida, limite)))
+            self.mensagens.put(("fim", (resultado, saidas, saida, limite)))
         except Exception as exc:  # a janela nunca deve morrer em silêncio
             registrar("\n" + traceback.format_exc())
             self.mensagens.put(("fim", exc))
@@ -267,8 +265,8 @@ class App:
             messagebox.showerror(TITULO, str(dado))
             return
 
-        resultado, saida, limite = dado  # type: ignore[misc]
-        self.ultimo_relatorio = saida
+        resultado, saidas, pasta, limite = dado  # type: ignore[misc]
+        self.ultimo_relatorio = saidas[0] if len(saidas) == 1 else pasta
         self.btn_abrir.configure(state="normal")
 
         limite_fmt = f"{limite:g}"
@@ -276,7 +274,9 @@ class App:
             f"\n{len(resultado.alunos)} aluno(s) com mais de {limite_fmt} faltas"
             f" (de {resultado.total_analisado} analisados)."
         )
-        self._escrever(f"Relatório salvo em: {saida.resolve()}")
+        self._escrever(f"\n{len(saidas)} relatório(s) em {pasta.resolve()}:")
+        for arquivo in saidas:
+            self._escrever(f"  - {arquivo.name}")
 
         aviso = ""
         if resultado.falhas:
@@ -288,10 +288,16 @@ class App:
                 "lidos (veja o andamento)."
             )
 
+        quantos = (
+            "1 relatório gerado"
+            if len(saidas) == 1
+            else f"{len(saidas)} relatórios gerados (um por escola)"
+        )
+        alvo = "o relatório" if len(saidas) == 1 else "a pasta"
         if messagebox.askyesno(
             TITULO,
-            f"Relatório gerado com {len(resultado.alunos)} aluno(s) acima de "
-            f"{limite_fmt} faltas.{aviso}\n\nDeseja abrir o relatório agora?",
+            f"{quantos}, com {len(resultado.alunos)} aluno(s) acima de "
+            f"{limite_fmt} faltas.{aviso}\n\nDeseja abrir {alvo} agora?",
         ):
             self._abrir()
 

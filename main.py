@@ -9,9 +9,10 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
 from parser import listar_pdfs, processar_lote
-from report_generator import gerar_relatorio
+from report_generator import gerar_relatorio, gerar_relatorios_por_escola
 
 LIMITE_PADRAO = 25.0
 SAIDA_PADRAO = "relatorio_faltas.pdf"
@@ -52,8 +53,17 @@ def montar_parser() -> argparse.ArgumentParser:
     )
     p.add_argument(
         "--saida",
-        default=SAIDA_PADRAO,
-        help="caminho do PDF de saída",
+        default=None,
+        help=(
+            "pasta onde salvar os relatórios (padrão: a pasta de entrada). "
+            "Aceita também um caminho .pdf, respeitado quando há uma escola só "
+            "ou junto de --consolidado"
+        ),
+    )
+    p.add_argument(
+        "--consolidado",
+        action="store_true",
+        help="gera um único PDF com todas as escolas, em vez de um por escola",
     )
     p.add_argument(
         "--recursivo",
@@ -101,10 +111,35 @@ def main(argv: list[str] | None = None) -> int:
             if detalhe:
                 print(f"        {detalhe}")
 
-    saida = gerar_relatorio(todos, args.saida, args.limite, total_analisado)
+    entrada = Path(args.caminho)
+    destino = Path(args.saida) if args.saida else (
+        entrada if entrada.is_dir() else entrada.parent
+    )
+    e_arquivo = destino.suffix.lower() == ".pdf"
 
     print(f"\n{len(todos)} aluno(s) com mais de {args.limite:g} faltas.")
-    print(f"Relatório gerado: {saida.resolve()}")
+
+    if args.consolidado:
+        arquivo = destino if e_arquivo else destino / SAIDA_PADRAO
+        saidas = [gerar_relatorio(todos, arquivo, args.limite, total_analisado)]
+    elif e_arquivo and len(resultado.total_por_escola) <= 1:
+        saidas = [gerar_relatorio(todos, destino, args.limite, total_analisado)]
+    else:
+        if e_arquivo:
+            print(
+                f"Aviso: {len(resultado.total_por_escola)} escolas encontradas;"
+                f" gerando um PDF por escola em {destino.parent.resolve()}"
+                " (use --consolidado para um arquivo único).",
+                file=sys.stderr,
+            )
+            destino = destino.parent
+        saidas = gerar_relatorios_por_escola(
+            todos, destino, args.limite, resultado.total_por_escola
+        )
+
+    print(f"{len(saidas)} relatório(s) gerado(s):")
+    for arquivo in saidas:
+        print(f"  - {arquivo.resolve()}")
     if falhas:
         print(f"\n{len(falhas)} arquivo(s) não processado(s):", file=sys.stderr)
         for pdf, motivo in falhas:

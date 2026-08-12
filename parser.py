@@ -461,12 +461,27 @@ def filtrar_por_faltas(alunos: list[Aluno], limite: float) -> list[Aluno]:
     return [a for a in alunos if a.faltas > limite]
 
 
+SEM_ESCOLA = "Escola não identificada"
+
+
+def agrupar_por_escola(alunos: list[Aluno]) -> dict[str, list[Aluno]]:
+    """Agrupa alunos por escola, preservando a ordem alfabética das escolas."""
+    grupos: dict[str, list[Aluno]] = {}
+    for aluno in alunos:
+        grupos.setdefault(aluno.turma_info.escola or SEM_ESCOLA, []).append(aluno)
+    return {escola: grupos[escola] for escola in sorted(grupos)}
+
+
 @dataclass
 class ResultadoLote:
     alunos: list[Aluno]          # já filtrados pelo limite
     total_analisado: int         # todos os alunos lidos, antes do filtro
     falhas: list[tuple[Path, str]]
     processados: int
+    # Total de alunos lidos por escola (antes do filtro). Também serve de lista
+    # das escolas processadas, inclusive as que ficaram sem nenhum aluno acima
+    # do limite.
+    total_por_escola: dict[str, int] = field(default_factory=dict)
 
 
 def processar_lote(pdfs: list[Path], limite: float, log=None) -> ResultadoLote:
@@ -479,6 +494,7 @@ def processar_lote(pdfs: list[Path], limite: float, log=None) -> ResultadoLote:
     falhas: list[tuple[Path, str]] = []
     total_analisado = 0
     processados = 0
+    total_por_escola: dict[str, int] = {}
 
     for pdf in pdfs:
         try:
@@ -496,6 +512,8 @@ def processar_lote(pdfs: list[Path], limite: float, log=None) -> ResultadoLote:
         alunos_filtrados.extend(acima)
         total_analisado += len(alunos)
         processados += 1
+        for escola, lista in agrupar_por_escola(alunos).items():
+            total_por_escola[escola] = total_por_escola.get(escola, 0) + len(lista)
 
         info = alunos[0].turma_info
         meses = meses_lancados(alunos)
@@ -513,17 +531,31 @@ def processar_lote(pdfs: list[Path], limite: float, log=None) -> ResultadoLote:
                 f" impresso ({total})"
             )
 
-    return ResultadoLote(alunos_filtrados, total_analisado, falhas, processados)
+    return ResultadoLote(
+        alunos_filtrados, total_analisado, falhas, processados, total_por_escola
+    )
+
+
+PREFIXO_SAIDA = "relatorio_faltas"
 
 
 def listar_pdfs(caminho: str | Path, recursivo: bool = False) -> list[Path]:
-    """Resolve o argumento de entrada em uma lista de PDFs."""
+    """Resolve o argumento de entrada em uma lista de PDFs.
+
+    Relatórios já gerados por este app são ignorados: como a saída costuma ir
+    para a mesma pasta dos PDFs de entrada, sem isso a execução seguinte tentaria
+    lê-los como se fossem mapas de frequência.
+    """
     caminho = Path(caminho)
     if caminho.is_file():
         return [caminho]
     if caminho.is_dir():
         padrao = "**/*.pdf" if recursivo else "*.pdf"
-        return sorted(p for p in caminho.glob(padrao) if p.is_file())
+        return sorted(
+            p
+            for p in caminho.glob(padrao)
+            if p.is_file() and not p.stem.lower().startswith(PREFIXO_SAIDA)
+        )
     raise FileNotFoundError(f"caminho não encontrado: {caminho}")
 
 
@@ -534,6 +566,9 @@ __all__ = [
     "ResultadoLote",
     "LayoutInesperadoError",
     "MESES",
+    "PREFIXO_SAIDA",
+    "SEM_ESCOLA",
+    "agrupar_por_escola",
     "divergencias_de_soma",
     "extrair_alunos",
     "filtrar_por_faltas",
